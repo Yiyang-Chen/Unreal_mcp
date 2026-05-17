@@ -1180,6 +1180,9 @@ private:
   bool HandleControlEditorScreenshot(const FString &RequestId,
                                      const TSharedPtr<FJsonObject> &Payload,
                                      TSharedPtr<FMcpBridgeWebSocket> Socket);
+  bool HandleControlEditorCaptureWindow(const FString &RequestId,
+                                        const TSharedPtr<FJsonObject> &Payload,
+                                        TSharedPtr<FMcpBridgeWebSocket> Socket);
   bool HandleControlEditorPause(const FString &RequestId,
                                 const TSharedPtr<FJsonObject> &Payload,
                                 TSharedPtr<FMcpBridgeWebSocket> Socket);

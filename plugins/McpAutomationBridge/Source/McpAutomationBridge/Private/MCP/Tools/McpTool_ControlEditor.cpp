@@ -39,8 +39,9 @@ public:
 				TEXT("set_viewport_resolution"),
 				TEXT("console_command"),
 				TEXT("execute_command"),
-				TEXT("screenshot"),
-				TEXT("take_screenshot"),
+			TEXT("screenshot"),
+			TEXT("take_screenshot"),
+			TEXT("capture_editor_window"),
 				TEXT("step_frame"),
 				TEXT("single_frame_step"),
 				TEXT("start_recording"),
@@ -62,10 +63,9 @@ public:
 				TEXT("undo"),
 				TEXT("redo"),
 				TEXT("save_all")
-			}, TEXT("Editor action. Note: screenshot/take_screenshot is async "
-				"\u2014 the file is written on the next rendered viewport frame, "
-				"not immediately. The editor window must be visible and actively "
-				"rendering for capture to complete."))
+		}, TEXT("Editor action. Note: screenshot/take_screenshot captures the 3D viewport "
+			"(async). capture_editor_window captures any editor tool window "
+			"(e.g., Animation Editor, Blueprint Editor) synchronously as PNG."))
 			.Object(TEXT("location"), TEXT("3D location (x, y, z)."),
 				[](FMcpSchemaBuilder& S) {
 				S.Number(TEXT("x")).Number(TEXT("y")).Number(TEXT("z"));
@@ -85,7 +85,8 @@ public:
 			.Integer(TEXT("steps"), TEXT(""))
 			.Integer(TEXT("id"), TEXT("Bookmark identifier/index."))
 			.String(TEXT("bookmarkName"), TEXT(""))
-			.String(TEXT("assetPath"), TEXT("Asset path (e.g., /Game/Path/Asset)."))
+			.String(TEXT("assetPath"), TEXT("Asset path (e.g., /Game/Path/Asset). For capture_editor_window, opens this asset's editor and captures it."))
+		.Bool(TEXT("returnBase64"), TEXT("For capture_editor_window: return PNG as base64 in response (default true)."))
 			.String(TEXT("levelPath"), TEXT("Level asset path."))
 			.String(TEXT("path"), TEXT("Path to a directory."))
 			.String(TEXT("actorName"), TEXT("Name of the actor."))

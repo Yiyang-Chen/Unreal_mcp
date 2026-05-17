@@ -154,6 +154,16 @@
 #include "Misc/OutputDevice.h"
 #include "UnrealClient.h" // For FScreenshotRequest
 
+// -----------------------------------------------------------------------------
+// Editor-only Includes: Widget Rendering (for editor window capture)
+// -----------------------------------------------------------------------------
+#include "Slate/WidgetRenderer.h"
+#include "Engine/TextureRenderTarget2D.h"
+#include "ImageUtils.h"
+#include "Misc/Base64.h"
+#include "Misc/FileHelper.h"
+#include "Framework/Application/SlateApplication.h"
+
 #endif // WITH_EDITOR
 
 #if WITH_EDITOR
@@ -3134,6 +3144,8 @@ bool UMcpAutomationBridgeSubsystem::HandleControlEditorAction(
     return HandleControlEditorOpenAsset(RequestId, Payload, RequestingSocket);
   if (LowerSub == TEXT("screenshot") || LowerSub == TEXT("take_screenshot"))
     return HandleControlEditorScreenshot(RequestId, Payload, RequestingSocket);
+  if (LowerSub == TEXT("capture_editor_window"))
+    return HandleControlEditorCaptureWindow(RequestId, Payload, RequestingSocket);
   if (LowerSub == TEXT("pause"))
     return HandleControlEditorPause(RequestId, Payload, RequestingSocket);
   if (LowerSub == TEXT("resume"))
@@ -3342,6 +3354,175 @@ bool UMcpAutomationBridgeSubsystem::HandleControlEditorScreenshot(
 #else
   SendStandardErrorResponse(this, Socket, RequestId, TEXT("NOT_IMPLEMENTED"),
                               TEXT("Screenshot requires editor build."), nullptr);
+  return true;
+#endif
+}
+
+bool UMcpAutomationBridgeSubsystem::HandleControlEditorCaptureWindow(
+    const FString &RequestId, const TSharedPtr<FJsonObject> &Payload,
+    TSharedPtr<FMcpBridgeWebSocket> Socket) {
+#if WITH_EDITOR
+  if (!GEditor) {
+    SendStandardErrorResponse(this, Socket, RequestId, TEXT("EDITOR_NOT_AVAILABLE"),
+                              TEXT("Editor not available"), nullptr);
+    return true;
+  }
+
+  FString AssetPath;
+  Payload->TryGetStringField(TEXT("assetPath"), AssetPath);
+
+  bool bReturnBase64 = true;
+  Payload->TryGetBoolField(TEXT("returnBase64"), bReturnBase64);
+
+  TSharedPtr<SWindow> TargetWindow;
+
+  if (!AssetPath.IsEmpty()) {
+    // Open the asset editor and find its window
+    UAssetEditorSubsystem* AssetEditorSubsystem =
+        GEditor->GetEditorSubsystem<UAssetEditorSubsystem>();
+    if (!AssetEditorSubsystem) {
+      SendStandardErrorResponse(this, Socket, RequestId, TEXT("SUBSYSTEM_NOT_AVAILABLE"),
+                                TEXT("AssetEditorSubsystem not available"), nullptr);
+      return true;
+    }
+
+    UObject* Asset = UEditorAssetLibrary::LoadAsset(AssetPath);
+    if (!Asset) {
+      SendStandardErrorResponse(this, Socket, RequestId, TEXT("ASSET_NOT_FOUND"),
+                                FString::Printf(TEXT("Could not load asset: %s"), *AssetPath),
+                                nullptr);
+      return true;
+    }
+
+    AssetEditorSubsystem->OpenEditorForAsset(Asset);
+
+    // Find the window that contains this asset editor by matching title
+    FString AssetName = Asset->GetName();
+    TArray<TSharedRef<SWindow>> AllWindows;
+    FSlateApplication::Get().GetAllVisibleWindowsOrdered(AllWindows);
+
+    for (const TSharedRef<SWindow>& Window : AllWindows) {
+      FString Title = Window->GetTitle().ToString();
+      if (Title.Contains(AssetName)) {
+        TargetWindow = Window;
+        break;
+      }
+    }
+
+    if (!TargetWindow.IsValid()) {
+      // Fallback: use the topmost non-main window
+      if (AllWindows.Num() > 1) {
+        TargetWindow = AllWindows.Last();
+      }
+    }
+  } else {
+    // Capture the currently active top-level window
+    TargetWindow = FSlateApplication::Get().GetActiveTopLevelWindow();
+  }
+
+  if (!TargetWindow.IsValid()) {
+    SendStandardErrorResponse(this, Socket, RequestId, TEXT("WINDOW_NOT_FOUND"),
+                              TEXT("No target editor window found to capture"), nullptr);
+    return true;
+  }
+
+  // Get window size from its geometry
+  FVector2D WindowSize = TargetWindow->GetClientSizeInScreen();
+  int32 Width = FMath::Max(1, FMath::TruncToInt(WindowSize.X));
+  int32 Height = FMath::Max(1, FMath::TruncToInt(WindowSize.Y));
+
+  if (Width <= 0 || Height <= 0) {
+    SendStandardErrorResponse(this, Socket, RequestId, TEXT("INVALID_WINDOW_SIZE"),
+                              TEXT("Target window has invalid size (possibly minimized)"),
+                              nullptr);
+    return true;
+  }
+
+  // Create render target
+  UTextureRenderTarget2D* RenderTarget = NewObject<UTextureRenderTarget2D>();
+  RenderTarget->InitCustomFormat(Width, Height, PF_B8G8R8A8, false);
+  RenderTarget->UpdateResourceImmediate(true);
+
+  // Render the window content using FWidgetRenderer
+  FWidgetRenderer* WidgetRenderer = new FWidgetRenderer(true, false);
+
+  TSharedRef<SWidget> WindowContent = TargetWindow->GetContent();
+  WidgetRenderer->DrawWidget(RenderTarget, WindowContent,
+                             FVector2D(1.0f, 1.0f),
+                             FVector2D(Width, Height), 0.0f);
+
+  FlushRenderingCommands();
+
+  // Read pixels from the render target
+  FTextureRenderTargetResource* RTResource =
+      RenderTarget->GameThread_GetRenderTargetResource();
+  if (!RTResource) {
+    delete WidgetRenderer;
+    SendStandardErrorResponse(this, Socket, RequestId, TEXT("RENDER_FAILED"),
+                              TEXT("Failed to get render target resource"), nullptr);
+    return true;
+  }
+
+  TArray<FColor> Bitmap;
+  Bitmap.SetNumUninitialized(Width * Height);
+  FReadSurfaceDataFlags ReadFlags(RCM_UNorm);
+  RTResource->ReadPixels(Bitmap, ReadFlags);
+
+  delete WidgetRenderer;
+
+  if (Bitmap.Num() == 0) {
+    SendStandardErrorResponse(this, Socket, RequestId, TEXT("CAPTURE_FAILED"),
+                              TEXT("Failed to read pixels from render target"), nullptr);
+    return true;
+  }
+
+  // Compress to PNG
+  TArray<uint8> PngData;
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
+  FImageUtils::ThumbnailCompressImageArray(Width, Height, Bitmap, PngData);
+#else
+  FImageUtils::CompressImageArray(Width, Height, Bitmap, PngData);
+#endif
+
+  if (PngData.Num() == 0) {
+    SendStandardErrorResponse(this, Socket, RequestId, TEXT("ENCODE_FAILED"),
+                              TEXT("Failed to compress screenshot to PNG"), nullptr);
+    return true;
+  }
+
+  // Save to disk
+  FString Filename = FString::Printf(TEXT("EditorCapture_%s.png"),
+      *FDateTime::Now().ToString(TEXT("%Y%m%d_%H%M%S")));
+  const FString ScreenshotDir =
+      FPaths::ProjectSavedDir() / TEXT("Screenshots") / TEXT("EditorCapture");
+  IFileManager::Get().MakeDirectory(*ScreenshotDir, true);
+  const FString FullPath = ScreenshotDir / Filename;
+
+  FFileHelper::SaveArrayToFile(PngData, *FullPath);
+
+  // Build response
+  TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
+  Resp->SetBoolField(TEXT("success"), true);
+  Resp->SetStringField(TEXT("screenshotPath"), FullPath);
+  Resp->SetStringField(TEXT("filename"), Filename);
+  Resp->SetNumberField(TEXT("width"), Width);
+  Resp->SetNumberField(TEXT("height"), Height);
+  Resp->SetNumberField(TEXT("sizeBytes"), PngData.Num());
+  Resp->SetStringField(TEXT("windowTitle"), TargetWindow->GetTitle().ToString());
+
+  if (bReturnBase64 && PngData.Num() > 0) {
+    FString Base64Data = FBase64::Encode(PngData);
+    Resp->SetStringField(TEXT("imageBase64"), Base64Data);
+    Resp->SetStringField(TEXT("mimeType"), TEXT("image/png"));
+  }
+
+  SendAutomationResponse(Socket, RequestId, true,
+                         FString::Printf(TEXT("Editor window captured (%dx%d)"), Width, Height),
+                         Resp, FString());
+  return true;
+#else
+  SendStandardErrorResponse(this, Socket, RequestId, TEXT("NOT_IMPLEMENTED"),
+                              TEXT("Editor window capture requires editor build."), nullptr);
   return true;
 #endif
 }
