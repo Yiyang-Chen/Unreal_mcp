@@ -159,6 +159,7 @@
 // -----------------------------------------------------------------------------
 #include "Slate/WidgetRenderer.h"
 #include "Engine/TextureRenderTarget2D.h"
+#include "TextureResource.h"
 #include "ImageUtils.h"
 #include "Misc/Base64.h"
 #include "Misc/FileHelper.h"
@@ -3448,7 +3449,6 @@ bool UMcpAutomationBridgeSubsystem::HandleControlEditorCaptureWindow(
 
   TSharedRef<SWidget> WindowContent = TargetWindow->GetContent();
   WidgetRenderer->DrawWidget(RenderTarget, WindowContent,
-                             FVector2D(1.0f, 1.0f),
                              FVector2D(Width, Height), 0.0f);
 
   FlushRenderingCommands();
